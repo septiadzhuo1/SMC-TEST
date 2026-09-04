@@ -1118,24 +1118,33 @@ function getTrend(){
   trendCache.key=key;
   return trendCache.data;
 }
+// distinct colors so the trendline never blends with green/red candles/OBs
+const TREND_UP="#2ad4ff", TREND_DN="#ff7a3d";  // bright cyan-blue / orange
 function drawTrendline(){
   const R=S.R; if(!R) return;
   const {val, slope}=getTrend();
-  ctx.beginPath(); let started=false, lastSlope=0;
+  const li=R.i1-1;
+  const up=(slope[li]||0)>0;
+  const col = up ? TREND_UP : TREND_DN;
+  // faint glow underlay for contrast, then the solid line on top
+  ctx.lineJoin="round";
+  ctx.beginPath(); let started=false;
   for(let i=R.i0;i<R.i1;i++){
     const v=val[i]; if(v==null){ started=false; continue; }
-    const x=R.xOf(i), y=R.yOf(v); lastSlope=slope[i]||0;
+    const x=R.xOf(i), y=R.yOf(v);
     if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
   }
-  ctx.strokeStyle = lastSlope>0 ? hexA(SMC.up,0.85) : hexA(SMC.dn,0.85);
-  ctx.lineWidth=1.6; ctx.setLineDash([7,4]); ctx.stroke(); ctx.setLineDash([]);
-  // label at the right end
-  const li=R.i1-1, lv=val[li];
+  ctx.strokeStyle=hexA(col,0.25); ctx.lineWidth=5; ctx.setLineDash([]); ctx.stroke();
+  ctx.strokeStyle=col; ctx.lineWidth=2.2; ctx.stroke();
+  // label chip at the right end
+  const lv=val[li];
   if(lv!=null){
-    const up=(slope[li]||0)>0;
-    ctx.font="9px -apple-system,system-ui,sans-serif"; ctx.textAlign="left"; ctx.textBaseline="bottom";
-    ctx.fillStyle= up?SMC.up:SMC.dn;
-    ctx.fillText(`Trend ${up?"↑":"↓"} (LR ${clamp(S.smc.trendLen||50,10,400)})`, R.xOf(li)-70, R.yOf(lv)-3);
+    const txt=`Trend ${up?"↑":"↓"} · LR ${clamp(S.smc.trendLen||50,10,400)}`;
+    ctx.font="10px -apple-system,system-ui,sans-serif"; ctx.textAlign="left"; ctx.textBaseline="middle";
+    const tw=ctx.measureText(txt).width;
+    const lx=Math.min(R.xOf(li)+6, R.p.x+R.p.w-tw-10), ly=R.yOf(lv);
+    ctx.fillStyle=col; ctx.fillRect(lx-3, ly-8, tw+8, 16);
+    ctx.fillStyle="#08121a"; ctx.fillText(txt, lx+1, ly);
   }
 }
 
