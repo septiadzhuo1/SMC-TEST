@@ -224,8 +224,7 @@
   <label class="swing" title="Swing sensitivity: higher = larger (external) structure">Swing <input type="number" id="swingLen" min="1" max="10" value="3"></label>
   <label class="swing" title="Risk : Reward — target = this multiple of the stop distance">RR 1: <input type="number" id="rrInput" min="0.5" max="10" step="0.5" value="3"></label>
   <span class="sep"></span>
-  <label title="Only take trades in the direction of a linear-regression trendline"><input type="checkbox" id="trendChk"> Trendline filter</label>
-  <label class="swing" title="Trendline lookback (bars)">Len <input type="number" id="trendLen" min="10" max="400" step="10" value="50"></label>
+  <label title="Only take trades in the direction of the trend (higher highs+lows / lower highs+lows)"><input type="checkbox" id="trendChk"> Trend filter</label>
   <span class="spacer"></span>
   <span id="smcInfo" class="smc-info"></span>
 </div>
@@ -296,7 +295,7 @@ const S = {
   poll:null, lastFetch:0,
   meta:{},                  // 24h ticker cache by symbol
   smc:{                     // Smart Money Concept engine (De Gus Trader method)
-    on:true, mode:"ob", swingLen:3, rr:3, trendFilter:false, trendLen:50, showTrend:false,
+    on:true, mode:"ob", swingLen:3, rr:3, trendFilter:false, showTrend:false,
     layers:{ struct:true, ob:true, fvg:true, liq:true, setup:true, trades:true },
   },
   histMode:false,           // viewing historical dataset (a clicked backtest trade)
@@ -838,14 +837,23 @@ function computeSMC(d, K){
   }
 
   // ---- structure: BOS (continuation) / MSS (reversal) by body break of swing ----
+  // Also track the last two confirmed highs & lows for the actual trendline, and
+  // a per-bar trend (HH+HL = up, LH+LL = down) used by the backtest filter.
   const events=[], swings=[];
+  const trendDir=new Array(n).fill(0);
   let trend=0, lastHigh=null, lastLow=null;
+  let lastHi=null, prevHi=null, lastLo=null, prevLo=null, tdir=0;
   for(let i=0;i<n;i++){
     const c=i-K;                     // pivot confirmed K bars after it printed
     if(c>=0){
-      if(isPH[c]){ lastHigh={i:c,price:d[c].h}; swings.push({i:c,price:d[c].h,type:'H'}); }
-      if(isPL[c]){ lastLow ={i:c,price:d[c].l}; swings.push({i:c,price:d[c].l,type:'L'}); }
+      if(isPH[c]){ lastHigh={i:c,price:d[c].h}; swings.push({i:c,price:d[c].h,type:'H'}); prevHi=lastHi; lastHi={i:c,price:d[c].h}; }
+      if(isPL[c]){ lastLow ={i:c,price:d[c].l}; swings.push({i:c,price:d[c].l,type:'L'}); prevLo=lastLo; lastLo={i:c,price:d[c].l}; }
     }
+    if(lastHi&&prevHi&&lastLo&&prevLo){
+      if(lastHi.price>prevHi.price && lastLo.price>prevLo.price) tdir=1;       // higher high + higher low
+      else if(lastHi.price<prevHi.price && lastLo.price<prevLo.price) tdir=-1; // lower high + lower low
+    }
+    trendDir[i]=tdir;
     if(lastHigh && i>lastHigh.i && d[i].c>lastHigh.price){
       events.push({i, fromI:lastHigh.i, price:lastHigh.price, dir:1, kind: trend<0?'MSS':'BOS'});
       trend=1; lastHigh=null;
@@ -855,6 +863,10 @@ function computeSMC(d, K){
       trend=-1; lastLow=null;
     }
   }
+  // current trendline: connect the last two rising lows (uptrend) or falling highs (downtrend)
+  let trendLine=null;
+  if(tdir===1 && prevLo && lastLo && lastLo.i!==prevLo.i) trendLine={dir:1, a:prevLo, b:lastLo};
+  else if(tdir===-1 && prevHi && lastHi && lastHi.i!==prevHi.i) trendLine={dir:-1, a:prevHi, b:lastHi};
 
   // ---- Order Blocks: last opposite candle before the impulse that broke structure ----
   const obs=[];
@@ -896,7 +908,7 @@ function computeSMC(d, K){
   };
   setup = pick(true) || pick(false);
 
-  return {events, swings, fvgs, obs, liq, trend, setup};
+  return {events, swings, fvgs, obs, liq, trend, setup, trendDir, trendLine};
 }
 
 function findOB(d, brkIdx, dir){
@@ -1109,49 +1121,46 @@ function updateSMCPanel(data){
     <div class="row"><span>Risk : Reward</span><b>1 : ${rr.toFixed(2)}</b></div>`;
 }
 
-/* ---------------- on-chart trendline (loaded candles) ---------------- */
-let trendCache={key:null, data:null};
-function getTrend(){
-  const key=sym()+"|"+S.tf+"|"+S.candles.length+"|"+S.smc.trendLen;
-  if(trendCache.key===key) return trendCache.data;
-  trendCache.data=trendInfo(S.candles, clamp(S.smc.trendLen||50,10,400));
-  trendCache.key=key;
-  return trendCache.data;
-}
+/* ---------------- on-chart trendline (straight, pivot-based) ---------------- */
 // distinct colors so the trendline never blends with green/red candles/OBs
 const TREND_UP="#2ad4ff", TREND_DN="#ff7a3d";  // bright cyan-blue / orange
 function drawTrendline(){
   const R=S.R; if(!R) return;
-  const {val, slope}=getTrend();
-  const li=R.i1-1;
-  const up=(slope[li]||0)>0;
-  const col = up ? TREND_UP : TREND_DN;
-  // faint glow underlay for contrast, then the solid line on top
-  ctx.lineJoin="round";
-  ctx.beginPath(); let started=false;
-  for(let i=R.i0;i<R.i1;i++){
-    const v=val[i]; if(v==null){ started=false; continue; }
-    const x=R.xOf(i), y=R.yOf(v);
-    if(!started){ ctx.moveTo(x,y); started=true; } else ctx.lineTo(x,y);
+  const tl=getSMC().trendLine;
+  if(!tl) return;                             // no clear up/down trend right now
+  const up=tl.dir===1, col=up?TREND_UP:TREND_DN;
+  const m=(tl.b.price-tl.a.price)/(tl.b.i-tl.a.i);   // slope (price per bar)
+  const yAt=(idx)=>tl.a.price + m*(idx-tl.a.i);
+  const startI=tl.a.i;
+  const endI=R.vStart + S.view.count;         // extend to the right edge (into the margin)
+  const x0=R.xOf(startI), y0=R.yOf(yAt(startI));
+  const x1=R.xOf(endI),   y1=R.yOf(yAt(endI));
+  // glow underlay, then dashed straight line
+  ctx.lineCap="round";
+  ctx.strokeStyle=hexA(col,0.22); ctx.lineWidth=5; ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+  ctx.strokeStyle=col; ctx.lineWidth=2; ctx.setLineDash([8,5]);
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke(); ctx.setLineDash([]);
+  ctx.lineCap="butt";
+  // mark the two anchor pivots
+  for(const pv of [tl.a, tl.b]){
+    const px=R.xOf(pv.i), py=R.yOf(pv.price);
+    ctx.fillStyle=col; ctx.beginPath(); ctx.arc(px,py,3.2,0,7); ctx.fill();
+    ctx.strokeStyle="rgba(0,0,0,.4)"; ctx.lineWidth=1; ctx.stroke();
   }
-  ctx.strokeStyle=hexA(col,0.25); ctx.lineWidth=5; ctx.setLineDash([]); ctx.stroke();
-  ctx.strokeStyle=col; ctx.lineWidth=2.2; ctx.stroke();
-  // label chip at the right end
-  const lv=val[li];
-  if(lv!=null){
-    const txt=`Trend ${up?"↑":"↓"} · LR ${clamp(S.smc.trendLen||50,10,400)}`;
-    ctx.font="10px -apple-system,system-ui,sans-serif"; ctx.textAlign="left"; ctx.textBaseline="middle";
-    const tw=ctx.measureText(txt).width;
-    const lx=Math.min(R.xOf(li)+6, R.p.x+R.p.w-tw-10), ly=R.yOf(lv);
-    ctx.fillStyle=col; ctx.fillRect(lx-3, ly-8, tw+8, 16);
-    ctx.fillStyle="#08121a"; ctx.fillText(txt, lx+1, ly);
-  }
+  // label chip riding the line near its right end
+  const txt=`Trendline ${up?"↑":"↓"}`;
+  ctx.font="10px -apple-system,system-ui,sans-serif"; ctx.textAlign="left"; ctx.textBaseline="middle";
+  const tw=ctx.measureText(txt).width;
+  const lbx=Math.min(R.xOf(tl.b.i)+8, R.p.x+R.p.w-tw-12), lby=R.yOf(yAt(Math.min(tl.b.i, endI)));
+  ctx.fillStyle=col; ctx.fillRect(lbx-3, lby-8, tw+8, 16);
+  ctx.fillStyle="#08121a"; ctx.fillText(txt, lbx+1, lby);
 }
 
 /* ---------------- on-chart backtest (loaded candles) ---------------- */
 let btCache={key:null, data:null};
 function getBTrades(){
-  const key = sym()+"|"+S.tf+"|"+S.candles.length+"|"+S.smc.swingLen+"|"+S.smc.mode+"|"+S.smc.rr+"|"+S.smc.trendFilter+"|"+S.smc.trendLen;
+  const key = sym()+"|"+S.tf+"|"+S.candles.length+"|"+S.smc.swingLen+"|"+S.smc.mode+"|"+S.smc.rr+"|"+S.smc.trendFilter;
   if(btCache.key===key) return btCache.data;
   const trades = runBacktest(S.candles, S.smc.mode);
   btCache.data = {trades, stats: backtestStats(trades)};
@@ -1239,39 +1248,21 @@ async function fetchHistory(symbol, interval, startMs, onProgress){
   return all;
 }
 
-// rolling linear-regression trendline: slope (price/bar) and line value at each bar
-function trendInfo(d, N){
-  const n=d.length; const slope=new Array(n).fill(0), val=new Array(n).fill(null);
-  let sx=0,sy=0,sxy=0,sxx=0,cnt=0;
-  for(let i=0;i<n;i++){
-    const x=i, y=d[i].c;
-    sx+=x; sy+=y; sxy+=x*y; sxx+=x*x; cnt++;
-    if(cnt>N){ const j=i-N, xo=j, yo=d[j].c; sx-=xo; sy-=yo; sxy-=xo*yo; sxx-=xo*xo; cnt--; }
-    if(cnt>=Math.min(N,5)){
-      const denom=cnt*sxx - sx*sx;
-      const m = denom!==0 ? (cnt*sxy - sx*sy)/denom : 0;
-      slope[i]=m; val[i]=m*x + (sy - m*sx)/cnt;
-    }
-  }
-  return {slope, val};
-}
-
 function runBacktest(d, mode){
   const K = clamp(S.smc.swingLen,1,10);
   const smc = computeSMC(d, K);
   const trades=[];
   let busyUntil=-1;
-  // optional trendline filter: only take trades aligned with the regression slope
+  // optional trendline filter: only take trades aligned with the structure trend
+  // (higher-highs+higher-lows = up, lower-highs+lower-lows = down) at the break bar
   const useTrend = S.smc.trendFilter;
-  const tinfo = useTrend ? trendInfo(d, clamp(S.smc.trendLen||50,10,400)) : null;
   for(const ob of smc.obs){
     if(!ob.valid) continue;
     if(ob.evI<=busyUntil) continue;              // one trade at a time
     const su = buildSetup(d, ob, smc.events);
     const s = mode==='ote' ? su.ote : su.obSetup;
     const dir = ob.dir;
-    // trendline filter: longs only when slope up, shorts only when slope down (at the break bar)
-    if(useTrend){ const sl=tinfo.slope[ob.evI]||0; if(dir===1 ? sl<=0 : sl>=0) continue; }
+    if(useTrend && (smc.trendDir[ob.evI]||0)!==dir) continue;  // trade only with the trend
     if(!(isFinite(s.entry)&&isFinite(s.sl)&&isFinite(s.tp))) continue;
     const risk=Math.abs(s.entry-s.sl); if(risk<=0) continue;
     // entry = limit fill: price returns to entry after the structure break
@@ -1355,7 +1346,7 @@ async function openReport(){
   const sub=document.getElementById("repSub");
   const body=document.getElementById("repBody");
   const rr=clamp(S.smc.rr||3,0.5,10);
-  const filt = S.smc.trendFilter ? ` · Trendline filter (LR ${clamp(S.smc.trendLen||50,10,400)})` : "";
+  const filt = S.smc.trendFilter ? " · Trend filter (HH+HL / LH+LL)" : "";
   const mode=S.smc.mode, modeName = (mode==='ote'?"Fib OTE (entry 71.5%, SL 100%)":"Order Block")+` · RR 1:${rr}`+filt;
   modal.classList.add("show");
   sub.textContent = `${S.base}/${QUOTE} · ${S.tf} · ${modeName} · since 2020-01-01`;
@@ -1694,10 +1685,6 @@ function wire(){
   });
   document.getElementById("trendChk").addEventListener("change",e=>{
     S.smc.trendFilter=e.target.checked; btCache.key=null; draw();
-  });
-  document.getElementById("trendLen").addEventListener("change",e=>{
-    S.smc.trendLen=clamp(+e.target.value||50,10,400); e.target.value=S.smc.trendLen;
-    trendCache.key=null; btCache.key=null; draw();
   });
 
   document.getElementById("reportBtn").onclick=openReport;
