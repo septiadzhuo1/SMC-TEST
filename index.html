@@ -1044,8 +1044,8 @@ function drawSMCOverlay(){
     }
   }
 
-  // ---- backtest trades on chart (entries, exits, outcomes) ----
-  if(L.trades) drawBTradesMarkers();
+  // ---- backtest trades on chart (per-entry trendline + entries, exits, outcomes) ----
+  if(L.trades){ drawTradeTrendlines(); drawBTradesMarkers(); }
 
   // ---- trade setup ----
   if(L.setup && data.setup){ drawSetup(data.setup); }
@@ -1124,6 +1124,42 @@ function updateSMCPanel(data){
 /* ---------------- on-chart trendline (straight, pivot-based) ---------------- */
 // distinct colors so the trendline never blends with green/red candles/OBs
 const TREND_UP="#2ad4ff", TREND_DN="#ff7a3d";  // bright cyan-blue / orange
+
+// the trendline in effect AT bar `e`: last two pivots (rising lows / falling highs) confirmed by then
+function trendLineAtIdx(data, e){
+  const dir=data.trendDir[e]||0; if(!dir) return null;
+  const type = dir===1 ? 'L' : 'H';   // uptrend rides lows, downtrend rides highs
+  let later=null, earlier=null;
+  for(let k=data.swings.length-1;k>=0;k--){
+    const s=data.swings[k];
+    if(s.i>e || s.type!==type) continue;
+    if(!later) later=s; else { earlier=s; break; }
+  }
+  if(!earlier||!later||earlier.i===later.i) return null;
+  return {dir, a:earlier, b:later};
+}
+
+// draw the trendline for every backtest-trade entry (each entry's own trend context)
+function drawTradeTrendlines(){
+  const R=S.R; if(!R) return;
+  const data=getSMC(); const {trades}=getBTrades();
+  for(const t of trades){
+    if(t.resIdx<R.i0-1 || t.entryIdx>R.i1+1) continue;
+    const tl=trendLineAtIdx(data, t.entryIdx);
+    if(!tl) continue;
+    const m=(tl.b.price-tl.a.price)/(tl.b.i-tl.a.i);
+    const yAt=(x)=>tl.a.price+m*(x-tl.a.i);
+    const up=tl.dir===1, col=up?TREND_UP:TREND_DN;
+    const x0=R.xOf(tl.a.i), y0=R.yOf(yAt(tl.a.i));      // from the earlier anchor
+    const x1=R.xOf(t.entryIdx), y1=R.yOf(yAt(t.entryIdx)); // to the entry
+    ctx.strokeStyle=hexA(col,0.55); ctx.lineWidth=1; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke(); ctx.setLineDash([]);
+    // tiny dots on the two anchor pivots
+    ctx.fillStyle=hexA(col,0.8);
+    ctx.beginPath(); ctx.arc(R.xOf(tl.a.i),R.yOf(tl.a.price),1.8,0,7); ctx.fill();
+    ctx.beginPath(); ctx.arc(R.xOf(tl.b.i),R.yOf(tl.b.price),1.8,0,7); ctx.fill();
+  }
+}
 function drawTrendline(){
   const R=S.R; if(!R) return;
   const tl=getSMC().trendLine;
