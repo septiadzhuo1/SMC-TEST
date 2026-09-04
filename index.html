@@ -196,6 +196,7 @@
 
   <button class="btn on" id="maBtn">MA</button>
   <button class="btn on" id="volBtn">Vol</button>
+  <button class="btn" id="trendBtn" title="Linear-regression trendline">Trend</button>
   <button class="btn" id="smcBtn" title="Smart Money Concept strategy (De Gus Trader)">SMC</button>
   <button class="btn" id="reportBtn" title="Backtest the SMC strategy since 2020-01-01">📊 Report</button>
 
@@ -295,7 +296,7 @@ const S = {
   poll:null, lastFetch:0,
   meta:{},                  // 24h ticker cache by symbol
   smc:{                     // Smart Money Concept engine (De Gus Trader method)
-    on:true, mode:"ob", swingLen:3, rr:3, trendFilter:false, trendLen:50,
+    on:true, mode:"ob", swingLen:3, rr:3, trendFilter:false, trendLen:50, showTrend:false,
     layers:{ struct:true, ob:true, fvg:true, liq:true, setup:true, trades:true },
   },
   histMode:false,           // viewing historical dataset (a clicked backtest trade)
@@ -596,6 +597,7 @@ function draw(){
   }
 
   if(S.showMA) drawMAs(p, i0, i1, cw, yOf, xOf);
+  if(S.smc.showTrend || S.smc.trendFilter) drawTrendline(); // LR trendline indicator (independent of SMC)
   if(S.smc.on) drawSMCOverlay(); // structure, liquidity, setup (in front of candles)
   if(S.focusTrade) drawFocusTrade(); // highlighted trade jumped-to from the report
   drawAxesLabels(p, pa, min, max);
@@ -1029,9 +1031,6 @@ function drawSMCOverlay(){
       ctx.fillText(tag, x0+3, s.type==='H'?y-1:y+1);
     }
   }
-
-  // ---- trendline filter (drawn when active) ----
-  if(S.smc.trendFilter) drawTrendline();
 
   // ---- backtest trades on chart (entries, exits, outcomes) ----
   if(L.trades) drawBTradesMarkers();
@@ -1654,6 +1653,8 @@ function wire(){
   maBtn.onclick=()=>{ S.showMA=!S.showMA; maBtn.classList.toggle("on",S.showMA); draw(); };
   const volBtn=document.getElementById("volBtn");
   volBtn.onclick=()=>{ S.showVol=!S.showVol; volBtn.classList.toggle("on",S.showVol); draw(); };
+  const trendBtn=document.getElementById("trendBtn");
+  trendBtn.onclick=()=>{ S.smc.showTrend=!S.smc.showTrend; trendBtn.classList.toggle("on",S.smc.showTrend); draw(); };
 
   // ---- SMC controls ----
   const smcBtn=document.getElementById("smcBtn"), smcbar=document.getElementById("smcbar");
