@@ -1248,9 +1248,13 @@ function drawSetup(su){
   const rightX = R.p.x+R.p.w;
   const yE=R.yOf(s.entry), yS=R.yOf(s.sl), yT=R.yOf(s.tp);
 
-  // reward / risk shading
-  ctx.fillStyle=hexA(SMC.tp,0.10); ctx.fillRect(x0, Math.min(yE,yT), rightX-x0, Math.abs(yT-yE));
-  ctx.fillStyle=hexA(SMC.sl,0.10); ctx.fillRect(x0, Math.min(yE,yS), rightX-x0, Math.abs(yS-yE));
+  // reward / risk shading (stronger fill + border so the zones read clearly)
+  const rw=rightX-x0;
+  ctx.fillStyle=hexA(SMC.tp,0.24); ctx.fillRect(x0, Math.min(yE,yT), rw, Math.abs(yT-yE));
+  ctx.fillStyle=hexA(SMC.sl,0.24); ctx.fillRect(x0, Math.min(yE,yS), rw, Math.abs(yS-yE));
+  ctx.lineWidth=1;
+  ctx.strokeStyle=hexA(SMC.tp,0.55); ctx.strokeRect(x0, Math.min(yE,yT), rw, Math.abs(yT-yE));
+  ctx.strokeStyle=hexA(SMC.sl,0.55); ctx.strokeRect(x0, Math.min(yE,yS), rw, Math.abs(yS-yE));
 
   // OTE fib guide
   if(mode==='ote'){
@@ -1268,7 +1272,7 @@ function drawSetup(su){
   }
 
   const line=(y,col,label)=>{
-    ctx.strokeStyle=col; ctx.lineWidth=1.3; ctx.setLineDash([6,3]);
+    ctx.strokeStyle=col; ctx.lineWidth=1.8; ctx.setLineDash([6,3]);
     ctx.beginPath(); ctx.moveTo(x0,y); ctx.lineTo(rightX,y); ctx.stroke();
     ctx.setLineDash([]);
     ctx.font="9px -apple-system,system-ui,sans-serif";
