@@ -334,7 +334,7 @@ const S = {
   focusTrade:null,          // the trade currently jumped-to, highlighted on chart
   lastBT:null,              // {trades, d, mode} from the most recent report run
   replay:{ on:false, full:null, idx:0, playing:false, timer:null, speed:2, dragDist:0 },
-  draw:{ tool:"none", lines:[], active:null, selected:-1 },  // manual trendline drawing
+  draw:{ tool:"none", lines:[], active:null, selected:-1, placing:false },  // manual trendline drawing
 };
 
 const MA_DEFS = [ {n:25,color:"#f0b90b"}, {n:99,color:"#c74dff"} ];
@@ -1776,10 +1776,11 @@ function drawUserLines(){
   for(let k=0;k<all.length;k++){
     const L=all[k];
     const x0=xOfTime(L.t0), y0=R.yOf(L.p0), x1=xOfTime(L.t1), y1=R.yOf(L.p1);
+    const isActive = S.draw.active && k===all.length-1;
     const sel=(k===S.draw.selected && !S.draw.active);
-    ctx.strokeStyle= sel ? "#ffd23f" : "#dfe6f0";
-    ctx.lineWidth= sel?2.2:1.6; ctx.setLineDash([]);
-    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    ctx.strokeStyle= isActive ? "#ffd23f" : (sel ? "#ffd23f" : "#dfe6f0");
+    ctx.lineWidth= sel||isActive?2.2:1.6; ctx.setLineDash(isActive?[6,4]:[]);
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke(); ctx.setLineDash([]);
     if(sel){
       for(const [hx,hy] of [[x0,y0],[x1,y1]]){
         ctx.fillStyle="#ffd23f"; ctx.strokeStyle="#08121a"; ctx.lineWidth=1;
@@ -1791,6 +1792,7 @@ function drawUserLines(){
 function deleteSelectedLine(){
   if(S.draw.selected>=0){ S.draw.lines.splice(S.draw.selected,1); S.draw.selected=-1; draw(); }
 }
+function lineLenPx(L){ return Math.hypot(xOfTime(L.t1)-xOfTime(L.t0), S.R.yOf(L.p1)-S.R.yOf(L.p0)); }
 
 /* ---------------- interaction ---------------- */
 function onWheel(e){
@@ -1812,13 +1814,20 @@ function onWheel(e){
 function onDown(e){
   const p=plot();
   const inPlot = e.offsetX<=p.x+p.w;
-  // drawing tool active → start a new line
+  // drawing tool active → draw a line. Works two ways:
+  //   • click-drag: press, move, release  •  two-click: click start, click end
   if(S.draw.tool==="line" && inPlot){
     const t=xToTime(e.offsetX), pr=yToPrice(e.offsetY);
-    S.draw.active={t0:t,p0:pr,t1:t,p1:pr};
+    if(S.draw.placing && S.draw.active){          // second click finalizes
+      S.draw.active.t1=t; S.draw.active.p1=pr;
+      if(lineLenPx(S.draw.active)>5){ S.draw.lines.push(S.draw.active); S.draw.selected=S.draw.lines.length-1; }
+      S.draw.active=null; S.draw.placing=false; draw(); return;
+    }
+    S.draw.active={t0:t,p0:pr,t1:t,p1:pr};         // first click starts
+    S.draw.placing=true;
     S.dragging={mode:"draw"};
     canvas.style.cursor="crosshair";
-    return;
+    draw(); return;
   }
   // cursor mode: grab a line endpoint or the whole line before falling back to pan
   if(inPlot && S.draw.lines.length){
@@ -1840,11 +1849,11 @@ function onDown(e){
 function onMove(e){
   const p=plot();
   S.hover={x:e.offsetX,y:e.offsetY};
+  // while placing a line (drag OR waiting for 2nd click), the end follows the cursor
+  if(S.draw.active){ S.draw.active.t1=xToTime(e.offsetX); S.draw.active.p1=yToPrice(e.offsetY); draw(); return; }
   if(S.dragging){
     const dm=S.dragging.mode;
-    if(dm==="draw"){
-      S.draw.active.t1=xToTime(e.offsetX); S.draw.active.p1=yToPrice(e.offsetY);
-    }else if(dm==="handle"){
+    if(dm==="handle"){
       const L=S.draw.lines[S.dragging.idx];
       if(S.dragging.end===0){ L.t0=xToTime(e.offsetX); L.p0=yToPrice(e.offsetY); }
       else { L.t1=xToTime(e.offsetX); L.p1=yToPrice(e.offsetY); }
@@ -1869,15 +1878,18 @@ function onMove(e){
   draw();
 }
 function onUp(){
-  if(S.dragging && S.dragging.mode==="draw" && S.draw.active){
-    const L=S.draw.active; S.draw.active=null;
-    // keep only if it's more than a tiny click
-    if(Math.hypot(xOfTime(L.t1)-xOfTime(L.t0), S.R.yOf(L.p1)-S.R.yOf(L.p0))>5){
-      S.draw.lines.push(L); S.draw.selected=S.draw.lines.length-1;
+  if(S.dragging && S.dragging.mode==="draw"){
+    S.dragging=null;
+    // a real drag (moved > 5px) finalizes now; a plain click stays "placing" for a 2nd click
+    if(S.draw.active && lineLenPx(S.draw.active)>5){
+      S.draw.lines.push(S.draw.active); S.draw.selected=S.draw.lines.length-1;
+      S.draw.active=null; S.draw.placing=false;
     }
+    draw();
+    return;
   }
   S.dragging=null;
-  canvas.style.cursor = S.draw.tool==="line" ? "crosshair" : "crosshair";
+  canvas.style.cursor="crosshair";
   draw();
 }
 function onLeave(){ S.hover=null; S.hoverIdx=null; draw(); }
@@ -1986,7 +1998,7 @@ function wire(){
   document.addEventListener("keydown",(e)=>{
     if(e.target && e.target.tagName==="INPUT") return;
     if((e.key==="Delete"||e.key==="Backspace") && S.draw.selected>=0){ e.preventDefault(); deleteSelectedLine(); }
-    if(e.key==="Escape"){ if(S.draw.tool==="line"){ S.draw.tool="none"; lineBtn.classList.remove("on"); } S.draw.active=null; S.draw.selected=-1; draw(); }
+    if(e.key==="Escape"){ if(S.draw.tool==="line"){ S.draw.tool="none"; lineBtn.classList.remove("on"); } S.draw.active=null; S.draw.placing=false; S.draw.selected=-1; draw(); }
   });
 
   // ---- SMC controls ----
