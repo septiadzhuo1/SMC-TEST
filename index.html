@@ -1464,13 +1464,15 @@ function runBacktest(d, mode){
       if(dir===1 ? d[i].h>=s.tp : d[i].l<=s.tp) break;
     }
     if(fill<0) continue;
-    // resolve SL vs TP (same-bar = pessimistic loss)
+    // resolve SL vs TP. Same-bar stop = pessimistic loss. TP may NOT resolve on the
+    // fill bar itself: a single long candle can't both fill the entry and hit the TP —
+    // that's intrabar lookahead (unknown order), so TP needs a later bar to confirm.
     let outcome='open', resIdx=d.length-1;
     for(let i=fill;i<d.length;i++){
       const hitSL = dir===1 ? d[i].l<=s.sl : d[i].h>=s.sl;
       const hitTP = dir===1 ? d[i].h>=s.tp : d[i].l<=s.tp;
       if(hitSL){ outcome='loss'; resIdx=i; break; }
-      if(hitTP){ outcome='win';  resIdx=i; break; }
+      if(hitTP && i>fill){ outcome='win'; resIdx=i; break; }
     }
     const rMult = outcome==='win' ? Math.abs(s.tp-s.entry)/risk : outcome==='loss' ? -1 : 0;
     trades.push({dir, entryIdx:fill, resIdx, outcome, r:rMult, t:d[fill].t, tRes:d[resIdx].t, entry:s.entry, sl:s.sl, tp:s.tp});
