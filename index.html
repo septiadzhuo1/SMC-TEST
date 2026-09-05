@@ -1049,21 +1049,48 @@ function computeSMC(d, K){
     if(!taken) liq.push(s);
   }
 
-  // ---- live setup: latest valid OB in trend direction (prefer unmitigated) ----
-  let setup=null;
-  const pick=(needUnmit)=>{
-    for(let x=obs.length-1;x>=0;x--){
-      const ob=obs[x];
-      if(trend && ob.dir!==trend) continue;
-      if(!ob.valid) continue;
-      if(needUnmit && ob.mitigated) continue;
-      return buildSetup(d,ob,events);
-    }
-    return null;
-  };
-  setup = pick(true) || pick(false);
+  // the live setup is chosen at draw time (mode + liveness aware) in activeSetup()
+  return {events, swings, fvgs, obs, liq, trend, trendDir, trendLine};
+}
 
-  return {events, swings, fvgs, obs, liq, trend, setup, trendDir, trendLine};
+// state of a setup at the latest revealed bar: is it still a real, takeable trade?
+// pending = price hasn't reached the entry yet (the "next entry" when price taps it)
+// active  = entry filled, neither TP nor SL hit yet
+// won/lost/missed = already resolved — no longer an active setup to show
+function setupLive(d, s, dir, fromIdx){
+  let fill=-1;
+  for(let i=fromIdx;i<d.length;i++){
+    if(dir===1 ? d[i].l<=s.entry : d[i].h>=s.entry){ fill=i; break; }
+    if(dir===1 ? d[i].h>=s.tp : d[i].l<=s.tp) return {state:"missed"};   // ran to target before entry
+  }
+  if(fill<0) return {state:"pending"};                                    // waiting for price to reach entry
+  for(let i=fill;i<d.length;i++){
+    const hitSL = dir===1 ? d[i].l<=s.sl : d[i].h>=s.sl;
+    const hitTP = dir===1 ? d[i].h>=s.tp : d[i].l<=s.tp;
+    if(hitSL) return {state:"lost", at:i};
+    if(hitTP && i>fill) return {state:"won", at:i};                       // (no same-bar TP — see runBacktest)
+  }
+  return {state:"active", fill};                                          // in the trade, unresolved
+}
+
+// pick the most recent valid OB (in trend dir) whose CURRENT-MODE setup is still live
+let setupCache={key:null, data:null};
+function activeSetup(){
+  const key=sym()+"|"+S.tf+"|"+dataSig()+"|"+S.smc.swingLen+"|"+S.smc.rr+"|"+S.smc.mode;
+  if(setupCache.key===key) return setupCache.data;
+  const data=getSMC(), d=S.candles;
+  let out=null;
+  for(let x=data.obs.length-1;x>=0;x--){
+    const ob=data.obs[x];
+    if(data.trend && ob.dir!==data.trend) continue;
+    if(!ob.valid) continue;
+    const su=buildSetup(d, ob, data.events);
+    const s = S.smc.mode==='ote' ? su.ote : su.obSetup;
+    const live=setupLive(d, s, ob.dir, ob.evI+1);
+    if(live.state==="pending" || live.state==="active"){ su.state=live.state; out=su; break; }
+  }
+  setupCache.data=out; setupCache.key=key;
+  return out;
 }
 
 function findOB(d, brkIdx, dir){
@@ -1202,9 +1229,10 @@ function drawSMCOverlay(){
   // ---- backtest trades on chart (per-entry trendline + entries, exits, outcomes) ----
   if(L.trades){ drawTradeTrendlines(); drawBTradesMarkers(); }
 
-  // ---- trade setup ----
-  if(L.setup && data.setup){ drawSetup(data.setup); }
-  updateSMCPanel(data);
+  // ---- trade setup (only if still live: pending or active) ----
+  const su=activeSetup();
+  if(L.setup && su){ drawSetup(su); }
+  updateSMCPanel(data, su);
 }
 
 function drawSetup(su){
@@ -1250,7 +1278,7 @@ function drawSetup(su){
   line(yS, SMC.sl, "SL "+fmtP(s.sl));
 }
 
-function updateSMCPanel(data){
+function updateSMCPanel(data, su){
   const el=document.getElementById("smcPanel");
   const info=document.getElementById("smcInfo");
   const trendTxt = data.trend===1?"Uptrend":data.trend===-1?"Downtrend":"Ranging";
@@ -1258,19 +1286,21 @@ function updateSMCPanel(data){
   info.innerHTML = `Trend <b style="color:${trendCol}">${trendTxt}</b> · `+
     `${data.events.length} breaks · ${data.obs.filter(o=>o.valid).length} OBs · ${data.liq.length} liquidity`;
 
-  if(!data.setup){ el.classList.remove("show"); return; }
-  const su=data.setup;
+  if(!su){ el.classList.remove("show"); return; }
   const s = S.smc.mode==='ote'? su.ote : su.obSetup;
   const long=su.dir===1;
   const rr=s.rr;
+  // state pill: PENDING = waiting for price to reach entry; ACTIVE = in the trade
+  const pending=su.state==="pending";
+  const stCol=pending?SMC.liq:SMC.tp, stTxt=pending?"PENDING":"ACTIVE";
   el.classList.add("show");
   el.innerHTML=`
     <div class="hd">
       <span class="pill" style="background:${long?hexA(SMC.up,.18):hexA(SMC.dn,.18)};color:${long?SMC.up:SMC.dn}">${long?"LONG":"SHORT"}</span>
       <span>${S.smc.mode==='ote'?"Fib OTE":"Order Block"} setup</span>
-      ${su.mitigated?'<span class="pill" style="background:rgba(224,169,42,.18);color:'+SMC.liq+'">tapped</span>':''}
+      <span class="pill" style="background:${hexA(stCol,.18)};color:${stCol}">${stTxt}</span>
     </div>
-    <div class="row"><span>Entry</span><b>${fmtP(s.entry)}</b></div>
+    <div class="row"><span>Entry ${pending?"(waiting)":""}</span><b>${fmtP(s.entry)}</b></div>
     <div class="row"><span>Stop loss</span><b style="color:${SMC.dn}">${fmtP(s.sl)}</b></div>
     <div class="row"><span>Take profit</span><b style="color:${SMC.tp}">${fmtP(s.tp)}</b></div>
     <div class="row"><span>Risk : Reward</span><b>1 : ${rr.toFixed(2)}</b></div>`;
