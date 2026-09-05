@@ -107,6 +107,10 @@
   #replaybar .smc-title{font-weight:700; color:var(--accent); letter-spacing:.4px; margin-right:2px}
   #replaybar .btn{padding:5px 9px}
   #rpInfo b{color:var(--text)}
+  #rpDate{background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:3px 6px; outline:none; font:inherit; color-scheme:dark}
+  [data-theme="light"] #rpDate{color-scheme:light}
+  #rpDate:focus{border-color:var(--accent)}
   #smcbar .smc-title{font-weight:700; color:var(--accent); letter-spacing:.4px}
   #smcbar label{display:flex; align-items:center; gap:5px; color:var(--muted); cursor:pointer}
   #smcbar label:hover{color:var(--text)}
@@ -247,7 +251,10 @@
   <div class="seg" id="rpSpeed" title="Playback speed">
     <button data-s="1">1×</button><button data-s="2" class="active">2×</button><button data-s="4">4×</button><button data-s="8">8×</button>
   </div>
-  <span class="smc-info" style="color:var(--muted)">Tip: pause, then click a candle to jump the cursor</span>
+  <span class="sep" style="width:1px;height:16px;background:var(--border)"></span>
+  <button class="btn" id="rpRandom" title="Jump to a random point in history">🎲 Random</button>
+  <input type="datetime-local" id="rpDate" title="Start replay at a specific date/time">
+  <button class="btn" id="rpGo" title="Go to the date/time">Go</button>
   <span class="spacer"></span>
   <span id="rpInfo" class="smc-info"></span>
 </div>
@@ -519,20 +526,54 @@ function handleTicker(d){
 // Reveal candles one at a time. Because every indicator/SMC computation runs on
 // S.candles (the revealed slice), the setup/entry shown is exactly what would have
 // been known at the cursor — no lookahead. Great for validating entries.
-function enterReplay(){
-  if(S.replay.on || !S.candles.length) return;
-  stopLive();                                  // pause the live stream
+// begin (or re-seed) replay with a given dataset + starting cursor
+function startReplayWith(full, cursorIdx){
   const rp=S.replay;
-  rp.on=true; rp.full=S.candles.slice(); rp.playing=false;
-  // start cursor at the current right-edge bar (or 55% in if we're at the live edge)
-  let start=Math.min(Math.round(S.view.i1), rp.full.length-1);
-  if(start>=rp.full.length-2) start=Math.floor(rp.full.length*0.55);
+  const first=!rp.on;
+  if(first) stopLive();                         // pause the live stream once
+  rp.on=true; rp.full=full; rp.playing=false;
+  if(rp.timer){ clearInterval(rp.timer); rp.timer=null; }
   document.getElementById("replaybar").hidden=false;
   document.getElementById("rpBtn").classList.add("on");
   document.getElementById("rpPlay").textContent="▶ Play";
   setStatus("","replay");
-  setReplayData(start, true);
-  resize();                                    // replaybar changes stage height
+  setReplayData(cursorIdx, true);
+  if(first) resize();                           // replaybar changes stage height
+}
+function enterReplay(){
+  if(S.replay.on || !S.candles.length) return;
+  const full=S.candles.slice();
+  let start=Math.min(Math.round(S.view.i1), full.length-1);
+  if(start>=full.length-2) start=Math.floor(full.length*0.55);
+  startReplayWith(full, start);
+}
+// fetch a 1000-bar window around a target time (with context before it) and replay from there
+async function loadReplayWindow(targetMs){
+  replayPause();
+  const tfMs=TFS.find(t=>t.k===S.tf).ms, CONTEXT=300;
+  const start=Math.floor(Math.max(BACKTEST_START, targetMs - CONTEXT*tfMs)); // integer ms — Binance rejects fractions
+  setStatus("","loading…"); showMsg("Loading replay window…");
+  try{
+    const raw=await apiGet(`/klines?symbol=${sym()}&interval=${S.tf}&startTime=${start}&limit=1000`);
+    const full=raw.map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));
+    if(full.length<50){ showMsg("Not enough data around that time — try another."); return; }
+    let idx=full.findIndex(c=>c.t>=targetMs);
+    if(idx<0) idx=Math.floor(full.length*0.5);
+    startReplayWith(full, clamp(idx,20,full.length-1));
+    showMsg("");
+  }catch(e){ showMsg("Couldn't load that window: "+e.message); setStatus("err","error"); }
+}
+function replayGoDate(){
+  const v=document.getElementById("rpDate").value; if(!v) return;
+  const ms=new Date(v).getTime(); if(isNaN(ms)) return;
+  loadReplayWindow(clamp(ms, BACKTEST_START, Date.now()));
+}
+function replayRandom(){
+  const hi=Date.now() - 60*24*3600e3;           // leave ~60 days of forward data to play
+  const ms=BACKTEST_START + Math.random()*(hi-BACKTEST_START);
+  const d=new Date(ms), p=(x)=>String(x).padStart(2,"0");
+  document.getElementById("rpDate").value=`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  loadReplayWindow(ms);
 }
 function exitReplay(){
   const rp=S.replay;
@@ -547,10 +588,11 @@ function exitReplay(){
 function setReplayData(idx, initial){
   const rp=S.replay; if(!rp.full) return;
   rp.idx=clamp(idx, 20, rp.full.length-1);
-  const atRight = initial || S.view.i1>=S.candles.length;
   S.candles=rp.full.slice(0, rp.idx+1);
-  if(initial){ S.view.count=clamp(150,20,S.candles.length); S.view.i1=S.candles.length; S.priceScale=null; }
-  else if(atRight){ S.view.i1=S.candles.length; }
+  if(initial){ S.view.count=clamp(150,20,rp.full.length); S.priceScale=null; }
+  // keep the replay cursor centered, with blank space to its right
+  const count=clamp(S.view.count,10,Math.max(10,S.candles.length));
+  S.view.i1 = rp.idx + Math.floor(count*0.5);
   updateReplayBar();
   draw();
 }
@@ -905,9 +947,15 @@ const SMC = {
   entry:"#4D8FFF", sl:"#e5484d", tp:"#26c281",
 };
 
+// dataset signature — length alone collides when two windows (e.g. replay jumps)
+// slice to the same length, so include the first & last candle timestamps.
+function dataSig(){
+  const n=S.candles.length;
+  return n+"|"+(n?S.candles[0].t:0)+"|"+(n?S.candles[n-1].t:0);
+}
 let smcCache = {key:null, data:null};
 function getSMC(){
-  const key = sym()+"|"+S.tf+"|"+S.candles.length+"|"+S.smc.swingLen+"|"+S.smc.rr;
+  const key = sym()+"|"+S.tf+"|"+dataSig()+"|"+S.smc.swingLen+"|"+S.smc.rr;
   if(smcCache.key===key) return smcCache.data;
   smcCache.data = computeSMC(S.candles, clamp(S.smc.swingLen,1,10));
   smcCache.key = key;
@@ -1303,7 +1351,7 @@ function drawTrendline(){
 /* ---------------- on-chart backtest (loaded candles) ---------------- */
 let btCache={key:null, data:null};
 function getBTrades(){
-  const key = sym()+"|"+S.tf+"|"+S.candles.length+"|"+S.smc.swingLen+"|"+S.smc.mode+"|"+S.smc.rr+"|"+S.smc.trendFilter;
+  const key = sym()+"|"+S.tf+"|"+dataSig()+"|"+S.smc.swingLen+"|"+S.smc.mode+"|"+S.smc.rr+"|"+S.smc.trendFilter;
   if(btCache.key===key) return btCache.data;
   const trades = runBacktest(S.candles, S.smc.mode);
   btCache.data = {trades, stats: backtestStats(trades)};
@@ -1849,6 +1897,9 @@ function wire(){
     [...e.currentTarget.children].forEach(x=>x.classList.toggle("active",x===b));
     replaySetSpeed(+b.dataset.s);
   });
+  document.getElementById("rpRandom").onclick=replayRandom;
+  document.getElementById("rpGo").onclick=replayGoDate;
+  document.getElementById("rpDate").addEventListener("keydown",(e)=>{ if(e.key==="Enter") replayGoDate(); });
   // click a candle (while paused) to jump the replay cursor
   canvas.addEventListener("click",(e)=>{
     if(!S.replay.on || S.replay.playing) return;
@@ -1888,10 +1939,11 @@ function wire(){
 }
 
 // recompute MAs whenever candles array identity/length matters — hook into draw via a light guard
-let _lastLen=-1,_lastSym="";
+let _maKey="";
 const _origDraw=draw;
 draw=function(){
-  if(S.candles.length!==_lastLen || sym()!==_lastSym){ computeMAs(); _lastLen=S.candles.length; _lastSym=sym(); }
+  const mk=sym()+"|"+dataSig();
+  if(mk!==_maKey){ computeMAs(); _maKey=mk; }
   _origDraw();
 };
 
