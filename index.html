@@ -99,6 +99,14 @@
     background:var(--panel2); border-bottom:1px solid var(--border); font-size:12px; user-select:none;
   }
   #smcbar[hidden]{display:none}
+  #replaybar{
+    display:flex; align-items:center; gap:8px; padding:6px 12px; flex-wrap:wrap;
+    background:var(--panel2); border-bottom:1px solid var(--border); font-size:12px; user-select:none;
+  }
+  #replaybar[hidden]{display:none}
+  #replaybar .smc-title{font-weight:700; color:var(--accent); letter-spacing:.4px; margin-right:2px}
+  #replaybar .btn{padding:5px 9px}
+  #rpInfo b{color:var(--text)}
   #smcbar .smc-title{font-weight:700; color:var(--accent); letter-spacing:.4px}
   #smcbar label{display:flex; align-items:center; gap:5px; color:var(--muted); cursor:pointer}
   #smcbar label:hover{color:var(--text)}
@@ -199,6 +207,7 @@
   <button class="btn" id="trendBtn" title="Linear-regression trendline">Trend</button>
   <button class="btn" id="smcBtn" title="Smart Money Concept strategy (De Gus Trader)">SMC</button>
   <button class="btn" id="reportBtn" title="Backtest the SMC strategy since 2020-01-01">📊 Report</button>
+  <button class="btn" id="rpBtn" title="Bar replay — step through history bar by bar">⏵ Replay</button>
 
   <div class="spacer"></div>
   <div class="status"><span class="dot" id="statusDot"></span><span id="statusTxt">loading…</span></div>
@@ -227,6 +236,20 @@
   <label title="Only take trades in the direction of the trend (higher highs+lows / lower highs+lows)"><input type="checkbox" id="trendChk"> Trend filter</label>
   <span class="spacer"></span>
   <span id="smcInfo" class="smc-info"></span>
+</div>
+
+<div id="replaybar" hidden>
+  <span class="smc-title">⏵ Replay</span>
+  <button class="btn" id="rpExit" title="Exit replay">✕ Exit</button>
+  <button class="btn" id="rpBack" title="Step back one bar">◀</button>
+  <button class="btn" id="rpPlay" title="Play / Pause">▶ Play</button>
+  <button class="btn" id="rpFwd" title="Step forward one bar">▶❘</button>
+  <div class="seg" id="rpSpeed" title="Playback speed">
+    <button data-s="1">1×</button><button data-s="2" class="active">2×</button><button data-s="4">4×</button><button data-s="8">8×</button>
+  </div>
+  <span class="smc-info" style="color:var(--muted)">Tip: pause, then click a candle to jump the cursor</span>
+  <span class="spacer"></span>
+  <span id="rpInfo" class="smc-info"></span>
 </div>
 
 <div id="stage">
@@ -301,6 +324,7 @@ const S = {
   histMode:false,           // viewing historical dataset (a clicked backtest trade)
   focusTrade:null,          // the trade currently jumped-to, highlighted on chart
   lastBT:null,              // {trades, d, mode} from the most recent report run
+  replay:{ on:false, full:null, idx:0, playing:false, timer:null, speed:2, dragDist:0 },
 };
 
 const MA_DEFS = [ {n:25,color:"#f0b90b"}, {n:99,color:"#c74dff"} ];
@@ -354,6 +378,13 @@ async function loadSymbol(resetView=true){
   setStatus("", "loading…");
   // leaving any historical (jumped-to trade) view
   S.histMode=false; S.focusTrade=null;
+  // leaving replay (switching symbol/tf): tear it down without recursing into exitReplay
+  if(S.replay.on){
+    if(S.replay.timer){ clearInterval(S.replay.timer); S.replay.timer=null; }
+    S.replay.on=false; S.replay.playing=false; S.replay.full=null;
+    const rb=document.getElementById("replaybar"); if(rb) rb.hidden=true;
+    const rbtn=document.getElementById("rpBtn"); if(rbtn) rbtn.classList.remove("on");
+  }
   const lb=document.getElementById("liveBtn"); if(lb) lb.hidden=true;
   try{
     const data = await fetchKlines(sym(), S.tf, 1000);
@@ -482,6 +513,82 @@ function handleKline(k){
 function handleTicker(d){
   S.meta[sym()]={ last:+d.c, chg:+d.P, vol:+d.q };
   updateSymBtn();
+}
+
+/* ---------------- bar replay ---------------- */
+// Reveal candles one at a time. Because every indicator/SMC computation runs on
+// S.candles (the revealed slice), the setup/entry shown is exactly what would have
+// been known at the cursor — no lookahead. Great for validating entries.
+function enterReplay(){
+  if(S.replay.on || !S.candles.length) return;
+  stopLive();                                  // pause the live stream
+  const rp=S.replay;
+  rp.on=true; rp.full=S.candles.slice(); rp.playing=false;
+  // start cursor at the current right-edge bar (or 55% in if we're at the live edge)
+  let start=Math.min(Math.round(S.view.i1), rp.full.length-1);
+  if(start>=rp.full.length-2) start=Math.floor(rp.full.length*0.55);
+  document.getElementById("replaybar").hidden=false;
+  document.getElementById("rpBtn").classList.add("on");
+  document.getElementById("rpPlay").textContent="▶ Play";
+  setStatus("","replay");
+  setReplayData(start, true);
+  resize();                                    // replaybar changes stage height
+}
+function exitReplay(){
+  const rp=S.replay;
+  if(rp.timer){ clearInterval(rp.timer); rp.timer=null; }
+  rp.playing=false; rp.on=false;
+  document.getElementById("replaybar").hidden=true;
+  document.getElementById("rpBtn").classList.remove("on");
+  if(rp.full){ S.candles=rp.full; rp.full=null; }
+  resize();
+  loadSymbol(false);                           // refetch fresh data + resume live stream
+}
+function setReplayData(idx, initial){
+  const rp=S.replay; if(!rp.full) return;
+  rp.idx=clamp(idx, 20, rp.full.length-1);
+  const atRight = initial || S.view.i1>=S.candles.length;
+  S.candles=rp.full.slice(0, rp.idx+1);
+  if(initial){ S.view.count=clamp(150,20,S.candles.length); S.view.i1=S.candles.length; S.priceScale=null; }
+  else if(atRight){ S.view.i1=S.candles.length; }
+  updateReplayBar();
+  draw();
+}
+function replayStep(delta){
+  const rp=S.replay; if(!rp.on) return;
+  if(rp.playing && delta>0){} // allow
+  const next=rp.idx+delta;
+  if(next>=rp.full.length-1 && rp.playing) replayPause();
+  setReplayData(next);
+}
+function replayPlay(){
+  const rp=S.replay; if(!rp.on || rp.playing) return;
+  if(rp.idx>=rp.full.length-1) return;         // nothing left to reveal
+  rp.playing=true;
+  document.getElementById("rpPlay").textContent="⏸ Pause";
+  rp.timer=setInterval(()=>{
+    if(rp.idx>=rp.full.length-1){ replayPause(); return; }
+    setReplayData(rp.idx+1);
+  }, Math.round(500/rp.speed));
+}
+function replayPause(){
+  const rp=S.replay;
+  rp.playing=false;
+  if(rp.timer){ clearInterval(rp.timer); rp.timer=null; }
+  const b=document.getElementById("rpPlay"); if(b) b.textContent="▶ Play";
+}
+function replayToggle(){ S.replay.playing ? replayPause() : replayPlay(); }
+function replaySetSpeed(s){
+  const rp=S.replay; rp.speed=s;
+  if(rp.playing){ replayPause(); replayPlay(); }   // restart timer at new speed
+}
+function updateReplayBar(){
+  const rp=S.replay; const el=document.getElementById("rpInfo"); if(!el) return;
+  const c=rp.full[rp.idx];
+  const d=c?new Date(c.t):null;
+  const p=(x)=>String(x).padStart(2,"0");
+  const when=d?`${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`:"";
+  el.innerHTML=`Bar <b>${rp.idx+1}</b> / ${rp.full.length} · ${when} · close <b>${c?fmtP(c.c):"—"}</b>`;
 }
 
 /* ---------------- view math ---------------- */
@@ -1578,6 +1685,7 @@ function onDown(e){
   }else{
     S.dragging={mode:"pan", x0:e.offsetX, i1:S.view.i1};
   }
+  S.replay.dragDist=0;
   canvas.style.cursor = S.dragging.mode==="scale"?"ns-resize":"grabbing";
 }
 function onMove(e){
@@ -1587,6 +1695,7 @@ function onMove(e){
     if(S.dragging.mode==="pan"){
       const cw=p.w/S.view.count;
       const dIdx=(e.offsetX-S.dragging.x0)/cw;
+      S.replay.dragDist=Math.abs(e.offsetX-S.dragging.x0);
       S.view.i1 = S.dragging.i1 - dIdx;   // clamped in draw() via clampViewEnd()
     }else{
       const dy=e.offsetY-S.dragging.y0;
@@ -1728,6 +1837,32 @@ function wire(){
   document.getElementById("repClose").onclick=closeReport;
   document.getElementById("report").addEventListener("click",(e)=>{ if(e.target.id==="report") closeReport(); });
   document.addEventListener("keydown",(e)=>{ if(e.key==="Escape") closeReport(); });
+
+  // ---- bar replay controls ----
+  document.getElementById("rpBtn").onclick=()=>{ S.replay.on?exitReplay():enterReplay(); };
+  document.getElementById("rpExit").onclick=exitReplay;
+  document.getElementById("rpBack").onclick=()=>{ replayPause(); replayStep(-1); };
+  document.getElementById("rpFwd").onclick=()=>{ replayPause(); replayStep(1); };
+  document.getElementById("rpPlay").onclick=replayToggle;
+  document.getElementById("rpSpeed").addEventListener("click",(e)=>{
+    const b=e.target.closest("button"); if(!b) return;
+    [...e.currentTarget.children].forEach(x=>x.classList.toggle("active",x===b));
+    replaySetSpeed(+b.dataset.s);
+  });
+  // click a candle (while paused) to jump the replay cursor
+  canvas.addEventListener("click",(e)=>{
+    if(!S.replay.on || S.replay.playing) return;
+    if((S.replay.dragDist||0)>=5) return;               // that was a pan, not a click
+    if(!S.R || !S.R.idxFromX) return;
+    setReplayData(S.R.idxFromX(e.offsetX));
+  });
+  // keyboard: space = play/pause, ← / → = step (ignore while typing in a field)
+  document.addEventListener("keydown",(e)=>{
+    if(!S.replay.on || (e.target && e.target.tagName==="INPUT")) return;
+    if(e.key===" "){ e.preventDefault(); replayToggle(); }
+    else if(e.key==="ArrowRight"){ e.preventDefault(); replayPause(); replayStep(1); }
+    else if(e.key==="ArrowLeft"){ e.preventDefault(); replayPause(); replayStep(-1); }
+  });
 
   document.getElementById("fitBtn").onclick=()=>{ S.view.count=clamp(120,20,S.candles.length); S.view.i1=S.candles.length; S.priceScale=null; draw(); };
   document.getElementById("themeBtn").onclick=toggleTheme;
